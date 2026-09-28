@@ -558,6 +558,7 @@ void Menu() {
             case '5': option5(); Serial.println(menu_banner); break;
             case '6': option6(); Serial.println(menu_banner); break;
             case '7': option7(); Serial.println(menu_banner); break;
+            case '8': option8(); Serial.println(menu_banner); break;
             case '9': option9(); Serial.println(menu_banner); break;
             default: continue;  // includes the case 'no input'
         }
