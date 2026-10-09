@@ -9,56 +9,54 @@
 #include <Adafruit_LittleFS.h>
 #include <InternalFileSystem.h>
 #include <nrfx_temp.h>
+#include <nrf.h>
 #include <Adafruit_NeoPixel.h>
 #include "RTClib.h"
 #include "SdFat_Adafruit_Fork.h"
 #include "Adafruit_TinyUSB.h"
-// Since SdFat doesn't fully support FAT12 such as format a new flash
-// We will use Elm Cham's fatfs f_mkfs() to format
 #include "ff.h"
 #include "diskio.h"
-#include <nrf.h>
-
+#include "flash_config.h" // for flashTransport definition
 
 #if defined ARDUINO_NRF52840_CIRCUITPLAY
 #define  PIN_VBAT          A8   // this is just a mock read, we'll use the light sensor, so we can run the test
 #endif
-
-uint32_t vbat_pin = PIN_VBAT;             // A7 for feather nRF52832, A6 for nRF52840
-
 #define VBAT_MV_PER_LSB   (0.73242188F)   // 3.0V ADC range and 12-bit ADC resolution = 3000mV/4096
-
-#ifdef NRF52840_XXAA
 #define VBAT_DIVIDER      (0.5F)          // 150K + 150K voltage divider on VBAT
 #define VBAT_DIVIDER_COMP (2.0F)          // Compensation factor for the VBAT divider
-#else
-#define VBAT_DIVIDER      (0.71275837F)   // 2M + 0.806M voltage divider on VBAT = (2M / (0.806M + 2M))
-#define VBAT_DIVIDER_COMP (1.403F)        // Compensation factor for the VBAT divider
-#endif
-
 #define REAL_VBAT_MV_PER_LSB (VBAT_DIVIDER_COMP * VBAT_MV_PER_LSB)
 
 #define RTC_INTERRUPT_PIN 10                //
-
-
-
-// for flashTransport definition
-#include "flash_config.h"
-
 #define MAX_LEVEL   3
-#define CLOCK_INTERRUPT_PIN 2
 
 #define DISK_LABEL "DATA"                   // up to 11 characters
 #define DATA_FILENAME "/data"               // the file where data will be stored
 #define SAMPLING_CFG_FILENAME    "/config"  // the file where config will be stored
+#define SAMPLE_FLAG_FILENAME "sample_on"
+#define MIN_SPI_FLASH_FREE_BYTES 10    // mininum space left in SPI flash before stopping sampling
+#define BUTTON_PIN 7
+
+uint32_t samplingFlag = 0; 
+
+
+Adafruit_SPIFlash flash(&flashTransport);
+FatVolume fatfs; // file system object from SdFat
+
+
+typedef struct
+{
+  unsigned long time;    // using custom epoch January 1, 2026 (1767225600)
+  unsigned int  vbat;
+  unsigned int  temp;
+} storeSample;
+
+
+uint32_t vbat_pin = PIN_VBAT;             // A7 for feather nRF52832, A6 for nRF52840
 
 nrfx_temp_config_t config = NRFX_TEMP_DEFAULT_CONFIG;
 
 TwoWire *wi = &Wire;
 
-Adafruit_SPIFlash flash(&flashTransport);
-
-FatVolume fatfs; // file system object from SdFat
 
 // USB Mass Storage object
 Adafruit_USBD_MSC usb_msc;
@@ -78,6 +76,7 @@ float sampleVbat = -1.0;
 
 
 int SamplingIntervalMenu();
+
 
 float readVBAT(void) {
   float raw;
@@ -186,58 +185,6 @@ void RTCStatus() {
   Serial.print(rtc.getTemperature());
   Serial.println(" C");
 }
-
-
-void printStatus() {
-  
-  printRTCtime();
-  displayVBAT();
-  displayNrfxTemp();
-  RTCStatus();
-  uint64_t freeBytes = SPIFlash_free();
-  Serial.print("  SPIFlash free capacity left: ");
-  Serial.print((uint32_t)(freeBytes / 1024));
-  Serial.println(" KB");
-}
-
-void printSPIflashTreeDir() {
-  // You can open a directory to list all the children (files and directories).
-  // Just like the SD library the File type represents either a file or
-  // directory.
-  File32 dataDir = fatfs.open("/");
-  if (!dataDir) {
-    Serial.println(F("  Error, failed to open data directory!"));
-    while (1) {
-      yield();
-    }
-  }
-  if (!dataDir.isDirectory()) {
-    Serial.println(F("Error, expected data to be a directory!"));
-    while (1) {
-      yield();
-    }
-  }
-  Serial.println(F("Listing children of directory / :"));
-  File32 child = dataDir.openNextFile();
-  while (child) {
-    char filename[64];
-    child.getName(filename, sizeof(filename));
-
-    // Print the file name and mention if it's a directory.
-    Serial.print(F("- "));
-    Serial.print(filename);
-    if (child.isDirectory()) {
-      Serial.print(F(" (directory)"));
-    }
-    Serial.println();
-    // Keep calling openNextFile to get a new file.
-    // When you're done enumerating files an unopened one will
-    // be returned (i.e. testing it for true/false like at the
-    // top of this while loop will fail).
-    child = dataDir.openNextFile();
-  }
-}
-
 
 
 
@@ -400,8 +347,10 @@ void setSamplingConfig() {
       }
   }
   Serial.println(F("  Writing config to file " SAMPLING_CFG_FILENAME ));
-  writeFile.print("interval:");
-  writeFile.println(n, DEC);
+  writeFile.print(n, DEC);
+  writeFile.print(",");
+  writeFile.println(0);
+  
   // Close the file when finished writing.
   writeFile.close();
    
@@ -409,77 +358,130 @@ void setSamplingConfig() {
 
 
 void sample() { 
+  
   DateTime now = rtc.now();
   sampleTemp = rtc.getTemperature();
   sampleTime = now.unixtime();
   sampleVbat = readVBAT();
+  
+}
 
+void printSample() { 
+  
   Serial.print(F("  sample UNIXTIME: " ));
   Serial.println(sampleTime);
   Serial.print(F("  sample Temperature [C]: "));
   Serial.println(sampleTemp);
   Serial.print(F("  sample Vbat [mv]: " ));
   Serial.println(sampleVbat);
+  
+}
+
+void printDataFile() { 
+  
+  File32 dataFile = fatfs.open(DATA_FILENAME, FILE_READ);
+  if (!dataFile) {
+    Serial.println(F("  Error, failed to open " DATA_FILENAME " for reading!"));
+  } else {
+    while (dataFile.available()) {
+      char c = dataFile.read();
+      Serial.print(c);
+    }  
+  }
 }
 
 
-bool readConfig() {
-  
+int readConfig() {
+  int samplingIntervalSecs = -1;
   // reads sampling parameters from SPIFlash config file
   File32 readFile = fatfs.open(SAMPLING_CFG_FILENAME, FILE_READ);
   if (!readFile) {
-      return false;
+      Serial.println("  Can't find config file !!!!");
+      return -1;
   }
-  while (readFile.available()) {
-    char c = readFile.read();
-    Serial.print(c);
-  }
+  
+  String line = readFile.readStringUntil('\n');
+  samplingIntervalSecs = line.toInt();
+  
   readFile.close();
-  return true;
+  return samplingIntervalSecs;
 }
 
 
 void showSamplingConfig() {
-   bool ret = readConfig();
-   
+   int samplingIntervalSecs = readConfig();
+   Serial.print("  Sampling interval [seconds]: ");
+   Serial.println(samplingIntervalSecs);
 }
 
-bool writeSample() { 
-  // writes sampling data to data file
-  if (!fatfs.exists(DATA_FILENAME)) {
-    Serial.println(F("Data file [" DATA_FILENAME "] doesn't exist - creating!"));
-    File32 writeFile = fatfs.open(DATA_FILENAME, FILE_WRITE);
-    if (!writeFile) {
-      Serial.println(F("  Error, failed to open " DATA_FILENAME " for writing!"));
-      return false;
-    }
-    writeFile.close();
+
+void led_signal1() {
+  
+  digitalWrite(LED_RED, LOW);
+  for(int i=0; i<5; i++) {
+        digitalToggle(LED_RED); // Toggle LED 
+        delay(1000);   
+      }
+  digitalWrite(LED_RED, LOW);
+  digitalWrite(LED_BLUE, HIGH);
+  for(int i=0; i<21; i++) {
+        digitalToggle(LED_RED); // Toggle LED 
+        digitalToggle(LED_BLUE); // Toggle LED 
+        delay(100);   
+      }
+  digitalWrite(LED_RED, LOW);
+  digitalWrite(LED_BLUE, LOW);
+
+}
+
+void led_signal2() {
+  
+  digitalWrite(LED_RED, LOW);
+  digitalWrite(LED_BLUE, HIGH);
+  for(int i=0; i<10; i++) {
+        digitalToggle(LED_RED); // Toggle LED 
+        digitalToggle(LED_BLUE); // Toggle LED 
+        delay(200);   
+      }
+  digitalWrite(LED_RED, LOW);
+  digitalWrite(LED_BLUE, LOW);
+
+}
+
+void led_signal3() {
+  
+  digitalWrite(LED_RED, LOW);
+  digitalWrite(LED_BLUE, HIGH);
+  for(int i=0; i<7; i++) {
+        digitalToggle(LED_RED); // Toggle LED 
+        digitalToggle(LED_BLUE); // Toggle LED 
+        delay(200);   
+      }
+//  digitalWrite(LED_RED, LOW);
+//  for(int i=0; i<7; i++) {
+//        digitalToggle(LED_BLUE); // Toggle LED 
+//        delay(200);   
+//      }
+  digitalWrite(LED_RED, LOW);
+  digitalWrite(LED_BLUE, LOW);
+  
+}
+
+
+void led_signal4() {
+  
+  digitalWrite(LED_RED, LOW);
+  digitalWrite(LED_BLUE, LOW);
+  for (int i=0; i<2; i++) {
+        digitalWrite(LED_BLUE, LOW);
+        for(int j=0; j<7; j++) {
+          digitalToggle(LED_BLUE); // Toggle LED 
+          delay(100);   
+        }
+        digitalWrite(LED_BLUE, LOW);
+        delay(500);
   }
-  File32 writeFile = fatfs.open(DATA_FILENAME, FILE_WRITE);
-  if (!writeFile) {
-    Serial.println(F("  Error, failed to open " DATA_FILENAME " for writing!"));
-    return false;
-  }
-  Serial.println(F("  Opened file " DATA_FILENAME " for writing/appending..."));
-
-  writeFile.print(sampleTime,DEC);
-  writeFile.print(",");
-  writeFile.print(sampleVbat,DEC);
-  writeFile.print(",");
-  writeFile.println(sampleTemp,DEC);
-  writeFile.close();
-  return true;
 }
-
-
-void oneShotSample() {
-  sample(); 
-  writeSample();
-  uint64_t freeBytes = SPIFlash_free();
-}
-
-
-
 
 
 const char * menu_banner = "\n \
@@ -498,7 +500,9 @@ const char * menu_banner = "\n \
   6 Set sampling config \n \
   7 Show sampling config \n \
   8 One-shot sample \n \
-  9 Run sampling \n";
+  9 Print data file \n \
+  R Run sampling \n";
+  
 
 
 void option0() {
@@ -543,14 +547,15 @@ void option8() {
   }
 
 void option9() {
-  setSamplingConfig();  
+  printDataFile();  
   }
 
-void Menu() {
+
+bool Menu() {
     Serial.println(menu_banner);
     for (;;) {
         switch (Serial.read()) {
-            case '0': option0(); Serial.println(menu_banner); break;
+            case '0': option0(); led_signal3(); Serial.println(menu_banner); break;
             case '1': option1(); Serial.println(menu_banner); break;
             case '2': option2(); Serial.println(menu_banner); break;
             case '3': option3(); Serial.println(menu_banner); break;
@@ -560,6 +565,7 @@ void Menu() {
             case '7': option7(); Serial.println(menu_banner); break;
             case '8': option8(); Serial.println(menu_banner); break;
             case '9': option9(); Serial.println(menu_banner); break;
+            case 'R': return startSampling(); 
             default: continue;  // includes the case 'no input'
         }
     }
@@ -567,41 +573,227 @@ void Menu() {
 
 const char * sampling_banner = "\n \
   Choose sampling interval: \n \
-  1 30 seconds \n \
-  2 60 seconds \n \
-  3 120 seconds \n \
-  4 300 seconds \n \
-  5 600 seconds \n ";
+  1 10 seconds \n \
+  2 30 seconds \n \
+  3 60 seconds \n \
+  4 120 seconds \n \
+  5 300 seconds \n \
+  6 600 seconds \n ";
 
 int SamplingIntervalMenu() {
     Serial.println(sampling_banner);
     for (;;) {
         switch (Serial.read()) {
-            case '1': return 30; break;
-            case '2': return 60; break;
-            case '3': return 120; break;
-            case '4': return 300; break;
-            case '5': return 600; break;
+            case '1': return 10; break;
+            case '2': return 30; break;
+            case '3': return 60; break;
+            case '4': return 120; break;
+            case '5': return 300; break;
+            case '6': return 600; break;
             default: continue;  // includes the case 'no input'
         }
     }
 }
 
+void oneShotSample() {
+  sample(); 
+  printSample();
+  uint32_t freeBytes = SPIFlash_free();
+  if (freeBytes > MIN_SPI_FLASH_FREE_BYTES) {
+    writeSample();
+  }
+}
+
+bool writeSample() { 
+  
+  // writes sampling data to data file
+  File32 writeFile = fatfs.open(DATA_FILENAME, FILE_WRITE);
+  if (!writeFile) {
+    return false;
+  }
+
+//
+//  storeSample smp = {
+//    (sampleTime - 1767225600) / 2,
+//    (sampleVbat*10),
+//    (sampleTemp*10)
+//    };
+  
+
+  writeFile.print(sampleTime,DEC);
+  writeFile.print(",");
+  writeFile.print(sampleVbat,DEC);
+  writeFile.print(",");
+  writeFile.println(sampleTemp,DEC);
+  writeFile.close();
+  return true;
+}
+
+bool startSampling() {
+  
+  int samplingIntervalSecs = readConfig();
+  if (samplingIntervalSecs > 0) {
+    samplingFlag = 1;
+    Adafruit_LittleFS_Namespace::File file(InternalFS);
+    if ( file.open(SAMPLE_FLAG_FILENAME, Adafruit_LittleFS_Namespace::FILE_O_WRITE)) {
+      file.write((uint8_t*)&samplingFlag, sizeof(samplingFlag));
+      file.close();
+      led_signal1(); 
+      return true;
+    } 
+  }
+  return false;
+}
+
+
+void stopSampling() {
+  
+//  samplingFlag = 0;
+//  Adafruit_LittleFS_Namespace::File file(InternalFS);
+//  if ( file.open(SAMPLE_FLAG_FILENAME, Adafruit_LittleFS_Namespace::FILE_O_WRITE)){
+//    file.write((uint8_t*)&samplingFlag, sizeof(samplingFlag));
+//  }
+//  file.close();
+  InternalFS.format();
+  
+  //we don't need the 32K Pin, so disable it
+  rtc.disable32K();
+  rtc.disableAlarm(1);
+  rtc.disableAlarm(2); 
+  led_signal3();
+  
+}
+
+void runSampling() {
+  led_signal3();
+  sample();
+  if (!writeSample()) {
+    stopSampling();
+    return;
+  }
+  uint64_t freeBytes = SPIFlash_free();
+  if (freeBytes < MIN_SPI_FLASH_FREE_BYTES) {
+      stopSampling();
+      return;
+    } 
+    
+  int sampleIntervalSeconds = readConfig();
+  rtc.disable32K();
+  rtc.disableAlarm(2);
+  rtc.clearAlarm(1);
+  rtc.writeSqwPinMode(DS3231_OFF);
+  if (!rtc.setAlarm1(rtc.now() + TimeSpan(0, 0, 0, sampleIntervalSeconds), DS3231_A1_Second)) { 
+    Serial.println("Failed to start sampling !");
+  } else {
+//    NRF_POWER->GPREGRET = 0x6d;
+    systemOff(RTC_INTERRUPT_PIN, 0);
+  }
+}
+
+
+ 
+
+bool amISampling() {
+    
+    Adafruit_LittleFS_Namespace::File file(InternalFS);
+    file.open(SAMPLE_FLAG_FILENAME, Adafruit_LittleFS_Namespace::FILE_O_READ);
+    samplingFlag = 0;
+    if (file) {
+      file.close();
+      return true;
+     }
+    return false;
+    
+}
+
+void onAlarm() {
+}
+
+void printStatus() {
+  bool usbConnected = (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
+  if (usbConnected ) {
+    Serial.println("  USB VBUS");
+  }
+  if (amISampling() ) {
+    Serial.println("  Sampling ON!");
+  } else {
+    Serial.println("  Sampling OFF!");
+  }
+
+  
+  printRTCtime();
+  displayVBAT();
+  displayNrfxTemp();
+  RTCStatus();
+  uint64_t freeBytes = SPIFlash_free();
+  Serial.print("  SPIFlash free capacity left: ");
+  Serial.print((uint32_t)(freeBytes / 1024));
+  Serial.println(" KB");
+}
+
+void printSPIflashTreeDir() {
+  // You can open a directory to list all the children (files and directories).
+  // Just like the SD library the File type represents either a file or
+  // directory.
+  File32 dataDir = fatfs.open("/");
+  if (!dataDir) {
+    Serial.println(F("  Error, failed to open data directory!"));
+    while (1) {
+      yield();
+    }
+  }
+  if (!dataDir.isDirectory()) {
+    Serial.println(F("Error, expected data to be a directory!"));
+    while (1) {
+      yield();
+    }
+  }
+  Serial.println(F("Listing children of directory / :"));
+  File32 child = dataDir.openNextFile();
+  while (child) {
+    char filename[64];
+    child.getName(filename, sizeof(filename));
+
+    // Print the file name and mention if it's a directory.
+    Serial.print(F("- "));
+    Serial.print(filename);
+    if (child.isDirectory()) {
+      Serial.print(F(" (directory)"));
+    }
+    Serial.println();
+    // Keep calling openNextFile to get a new file.
+    // When you're done enumerating files an unopened one will
+    // be returned (i.e. testing it for true/false like at the
+    // top of this while loop will fail).
+    child = dataDir.openNextFile();
+  }
+}
+
 void setup() {
 
-  // Initialize Internal File System
-  InternalFS.begin();
-  // i2c bus (address optional for main)
-  wi->begin();        
-
-  // nRF52840 internal temp sensor
-  nrfx_temp_init(&config, NULL);
-
-  bool flash_ok = flash.begin();
+  
+  bool flash_ok = flash.begin(); 
   bool rtc_ok = rtc.begin();
-  bool usb_mounted = USBDevice.mounted();
+  bool flash_mount_ok = fatfs.begin(&flash);
 
+  if (rtc_ok) {
+    pinMode(RTC_INTERRUPT_PIN, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(RTC_INTERRUPT_PIN), onAlarm, FALLING);
 
+    rtc.clearAlarm(1);
+    rtc.clearAlarm(2);
+  
+    // stop oscillating signals at SQW Pin
+    // otherwise setAlarm1 will fail
+    rtc.writeSqwPinMode(DS3231_OFF);
+  
+    // turn off alarm 2 (in case it isn't off already)
+    // again, this isn't done at reboot, so a previously set alarm could easily go overlooked
+    rtc.disableAlarm(2);
+    
+  }
+
+  
   // Set disk vendor id, product id and revision with string up to 8, 16, 4 characters respectively
   usb_msc.setID("Adafruit", "External Flash", "1.0");
 
@@ -616,30 +808,55 @@ void setup() {
 
   usb_msc.begin();
 
-  
-  
-//  if (usb_mounted) {
-   if (1==1) {
+  bool usbConnected = (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
+  bool stopped = false;
     
+
+   // Initialize Internal File System
+  InternalFS.begin();
+
+  // i2c bus (address optional for main)
+  wi->begin();        
+
+  // nRF52840 internal temp sensor
+  nrfx_temp_init(&config, NULL);
+
+  if (amISampling() && rtc.lostPower()) {    
+    stopSampling();
+  }
+
+
+
+
+  if (USBDevice.mounted()) {
     // USB connected to a host
     Serial.begin(115200);
     while ( !Serial ) delay(10);   // for nrf52840 with native usb
-    dbgMemInfo();
-    Serial.println(usb_mounted);
-    
+
+   
+    if (stopped) {
+      Serial.println("  Stopped sampling !");
+    }
+
+    if (amISampling()) {
+      Serial.println("  I should be sampling... !");
+    }
+
     if (!flash_ok) {
-      Serial.println("Error, failed to initialize flash chip!");
+      Serial.println("  Error, failed to initialize flash chip!");
       while (1) {}
     }
 
     if (!rtc_ok) {
-      Serial.println("Couldn't find RTC");
+      Serial.println("  Couldn't find RTC");
       Serial.flush();
       while (1) delay(10);
+    } else {
+      Serial.println("  RTC OK");
     }
 
     if (rtc.lostPower()) {
-      Serial.println("RTC lost power, let's set the time!");
+      Serial.println("  RTC lost power, let's set the time!");
       // When time needs to be set on a new device, or after a power loss, the
       // following line sets the RTC to the date & time this sketch was compiled
       rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
@@ -648,53 +865,45 @@ void setup() {
       // rtc.adjust(DateTime(2014, 1, 21, 3, 0, 0));
     }
 
-    Serial.print("  Flash chip JEDEC ID: 0x");
-    Serial.println(flash.getJEDECID(), HEX);
-    Serial.print(F("  Flash size: "));
-    Serial.print(flash.size() / 1024);
-    Serial.println(F(" KB"));
     
-
-    if (!fatfs.begin(&flash)) {
+    
+    if (!flash_mount_ok) {
       Serial.println(F("  Error, failed to mount newly formatted filesystem!"));
       Serial.println(F("  Was the flash chip formatted with the SdFat_format example?"));
     }
     Serial.println(F("  Mounted SPIFlash filesystem!"));
 
-    // Get a single ADC sample and throw it away
-    readVBAT();
+    Serial.println("  USB mounted!");
+
+    Serial.print("  Flash chip JEDEC ID: 0x");
+    Serial.println(flash.getJEDECID(), HEX);
+    Serial.print(F("  Flash size: "));
+    Serial.print(flash.size() / 1024);
+    Serial.println(F(" KB"));
     printStatus();
-
-    Serial.println();
-   
-   } else {
-
-      // run the logger
-      for(int i=0; i<4; i++) {
-        digitalToggle(LED_RED); // Toggle LED 
-        delay(2000);   
-      }
-      sample();
-      writeSample();
-      for(int i=0; i<6; i++) {
-        digitalToggle(LED_RED); // Toggle LED 
-        delay(1000);   
-      }
-      
     
-   }
+    Serial.println();
+   } 
       
 }
 
 
 void loop() {
-  
-  if (USBDevice.mounted()) {
-    Menu();
-    delay(1000);
-  } else {
-    
+  bool usbConnected = (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
+  if (usbConnected) {
+    bool exitLoop = false;
+    while (!exitLoop) {
+      exitLoop = Menu();
+    }
+    Serial.println("   Exiting menu!");
   }
+
+  if (amISampling()) {
+      Serial.println("   Running sampling!");
+      runSampling();  
+    }
+    
+ 
 }
 
 
