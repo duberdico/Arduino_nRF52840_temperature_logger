@@ -5,7 +5,6 @@
 #include <flash_devices.h>
 #include <Adafruit_FlashTransport.h>
 #include <Adafruit_FlashCache.h>
-#include <InternalFileSystem.h>
 #include <Adafruit_LittleFS.h>
 #include <InternalFileSystem.h>
 #include <nrfx_temp.h>
@@ -612,19 +611,23 @@ bool writeSample() {
     return false;
   }
 
-//
-//  storeSample smp = {
-//    (sampleTime - 1767225600) / 2,
-//    (sampleVbat*10),
-//    (sampleTemp*10)
-//    };
+  // binary format
+  storeSample smp = {
+    (sampleTime - 1767225600) / 2,
+    (sampleVbat*10),
+    (sampleTemp*10)
+  };
+  writeFile.write((const uint8_t *)&smp, sizeof(smp));
   
+//
+//  // text format
+//  writeFile.print(sampleTime,DEC);
+//  writeFile.print(",");
+//  writeFile.print(sampleVbat,DEC);
+//  writeFile.print(",");
+//  writeFile.println(sampleTemp,DEC);
 
-  writeFile.print(sampleTime,DEC);
-  writeFile.print(",");
-  writeFile.print(sampleVbat,DEC);
-  writeFile.print(",");
-  writeFile.println(sampleTemp,DEC);
+  
   writeFile.close();
   return true;
 }
