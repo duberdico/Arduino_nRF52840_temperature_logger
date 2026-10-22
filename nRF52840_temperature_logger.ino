@@ -9,7 +9,8 @@
 #include <InternalFileSystem.h>
 #include <nrfx_temp.h>
 #include <nrf.h>
-#include <Adafruit_NeoPixel.h>
+#include <Adafruit_TMP119.h>
+
 #include "RTClib.h"
 #include "SdFat_Adafruit_Fork.h"
 #include "Adafruit_TinyUSB.h"
@@ -37,6 +38,7 @@
 
 uint32_t samplingFlag = 0; 
 
+Adafruit_TMP119 tmp11x;
 
 Adafruit_SPIFlash flash(&flashTransport);
 FatVolume fatfs; // file system object from SdFat
@@ -46,6 +48,7 @@ typedef struct
 {
   unsigned long time;    // using custom epoch January 1, 2026 (1767225600)
   unsigned int  vbat;
+  unsigned int  rtcTemp;
   unsigned int  temp;
 } storeSample;
 
@@ -69,6 +72,7 @@ bool fs_changed = true;;
 
 RTC_DS3231 rtc;
 
+float sampleRtcTemp = -1;
 float sampleTemp = -1;
 long sampleTime = -1.0;
 float sampleVbat = -1.0;
@@ -357,9 +361,21 @@ void setSamplingConfig() {
 
 
 void sample() { 
-  
+
   DateTime now = rtc.now();
-  sampleTemp = rtc.getTemperature();
+
+  if (tmp11x.begin()) {
+    while (!tmp11x.dataReady()) {
+      delay(10);
+    }
+    sensors_event_t temp; 
+    tmp11x.getEvent(&temp); // fill the empty event object with the current measurements
+    sampleTemp = temp.temperature;
+  } else {
+    sampleTemp = -1;
+  }
+
+  sampleRtcTemp = rtc.getTemperature();
   sampleTime = now.unixtime();
   sampleVbat = readVBAT();
   
@@ -369,7 +385,9 @@ void printSample() {
   
   Serial.print(F("  sample UNIXTIME: " ));
   Serial.println(sampleTime);
-  Serial.print(F("  sample Temperature [C]: "));
+  Serial.print(F("  sample RTC Temperature [C]: "));
+  Serial.println(sampleRtcTemp);
+  Serial.print(F("  sample TMP119 Temperature [C]: "));
   Serial.println(sampleTemp);
   Serial.print(F("  sample Vbat [mv]: " ));
   Serial.println(sampleVbat);
@@ -615,6 +633,7 @@ bool writeSample() {
   storeSample smp = {
     (sampleTime - 1767225600) / 2,
     (sampleVbat*10),
+    (sampleRtcTemp*10),
     (sampleTemp*10)
   };
   writeFile.write((const uint8_t *)&smp, sizeof(smp));
@@ -624,6 +643,8 @@ bool writeSample() {
 //  writeFile.print(sampleTime,DEC);
 //  writeFile.print(",");
 //  writeFile.print(sampleVbat,DEC);
+//  writeFile.print(",");
+//  writeFile.println(sampleRtcTemp,DEC);
 //  writeFile.print(",");
 //  writeFile.println(sampleTemp,DEC);
 
@@ -811,7 +832,6 @@ void setup() {
 
   usb_msc.begin();
 
-  bool usbConnected = (NRF_POWER->USBREGSTATUS & POWER_USBREGSTATUS_VBUSDETECT_Msk) != 0;
   bool stopped = false;
     
 

@@ -8,7 +8,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 EPOCH_OFFSET = 1767225600
-RECORD_FORMAT = "<III"
+RECORD_FORMAT = "<IIII"
 RECORD_SIZE = struct.calcsize(RECORD_FORMAT)
 
 
@@ -27,6 +27,7 @@ def convert_file(input_file, output_file, make_plot=False, plot_file=None):
     times = []
     iso_times = []
     vbat_values = []
+    rtc_temp_values = []
     temp_values = []
 
     with open(output_file, "w", newline="") as csvfile:
@@ -37,12 +38,15 @@ def convert_file(input_file, output_file, make_plot=False, plot_file=None):
                 "Unix time",
                 "ISO8601 time",
                 "vbat_mv",
+                "RTCtemp_c",
                 "temp_c",
             ]
         )
 
         for offset in range(0, len(data), RECORD_SIZE):
-            timestamp, vbat, temp = struct.unpack_from(RECORD_FORMAT, data, offset)
+            timestamp, vbat, rtc_temp, temp = struct.unpack_from(
+                RECORD_FORMAT, data, offset
+            )
 
             unix_time = (timestamp * 2) + EPOCH_OFFSET
 
@@ -53,6 +57,7 @@ def convert_file(input_file, output_file, make_plot=False, plot_file=None):
             )
 
             vbat_mv = vbat / 10
+            rtc_temp_c = rtc_temp / 10
             temp_c = temp / 10
 
             writer.writerow(
@@ -60,6 +65,7 @@ def convert_file(input_file, output_file, make_plot=False, plot_file=None):
                     unix_time,
                     iso8601_time,
                     vbat_mv,
+                    rtc_temp_c,
                     temp_c,
                 ]
             )
@@ -68,13 +74,14 @@ def convert_file(input_file, output_file, make_plot=False, plot_file=None):
                 times.append(datetime.fromtimestamp(unix_time, tz=timezone.utc))
                 iso_times.append(iso8601_time)
                 vbat_values.append(vbat_mv)
+                rtc_temp_values.append(rtc_temp_c)
                 temp_values.append(temp_c)
 
     print(f"Converted {record_count} samples")
     print(f"CSV output: {output_file}")
 
     if make_plot:
-        create_plot(times, vbat_values, temp_values, plot_file)
+        create_plot(times, vbat_values, rtc_temp_values, temp_values, plot_file)
 
 
 def create_plot(times, vbat_values, temp_values, plot_file):
