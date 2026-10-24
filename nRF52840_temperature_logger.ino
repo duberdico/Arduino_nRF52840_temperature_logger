@@ -763,8 +763,13 @@ void stopSampling() {
 }
 
 void runSampling() {
-  led_signal3();
+  
+
   sample();
+  samplingConfig config = readConfig();
+  if (config.ledOnSampling == true) {
+     led_signal3();
+  }
   if (!writeSample()) {
     stopSampling();
     return;
