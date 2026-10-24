@@ -417,10 +417,17 @@ void setSamplingConfig() {
    Serial.print(config.samplingIntervalSecs);
    Serial.println(F(" seconds" ));
    if (config.ledOnSampling) {
-      Serial.println(F(" LED on sampling: ON" ));
+      Serial.println(F("  LED on sampling: ON" ));
    } else {
-      Serial.println(F(" LED on sampling: OFF" ));
+      Serial.println(F("  LED on sampling: OFF" ));
    }
+
+   if (fatfs.exists(SAMPLING_CFG_FILENAME)) {
+     if (!fatfs.remove(SAMPLING_CFG_FILENAME)) {
+        Serial.println("   Failed to delete old config file");
+     }
+   }
+
    File32 writeFile = fatfs.open(SAMPLING_CFG_FILENAME, FILE_WRITE);
    if (!writeFile) {
       Serial.println(F("Error, failed to open " SAMPLING_CFG_FILENAME " for writing!"));
@@ -430,18 +437,13 @@ void setSamplingConfig() {
   }
   Serial.println(F("  Writing config to file " SAMPLING_CFG_FILENAME ));
 
-  writeFile.write((uint8_t *)&config, sizeof(config));
+  // writeFile.write((uint8_t *)&config, sizeof(config));
 
-  // writeFile.print(n, DEC);
-  // writeFile.print(",");
-  // writeFile.println(0);
+  writeFile.println(samplingIntervalSecs, DEC);
+  writeFile.println(ledOnSampling);
   
   // Close the file when finished writing.
   writeFile.close();
-
-  samplingConfig writtenConfig = readConfig();
-  Serial.println(writtenConfig.samplingIntervalSecs);
-  Serial.println(writtenConfig.ledOnSampling);
    
 }
 
@@ -456,14 +458,22 @@ samplingConfig readConfig() {
       return config;
   }
   
-  const size_t bytesRead = readFile.read((uint8_t *)&config, sizeof(config));
-  Serial.println(bytesRead);
-  // String line = readFile.readStringUntil('\n');
-  // samplingIntervalSecs = line.toInt();
-  // String line = readFile.readStringUntil('\n');
-  // ledOnSampling = line.toInt();
-  
+  // const size_t bytesRead = readFile.read((uint8_t *)&config, sizeof(config));
+  // Serial.println(bytesRead);
+
+  String line;
+  line = readFile.readStringUntil('\n');
+  int samplingIntervalSecs = line.toInt();
+  line = readFile.readStringUntil('\n');
+  bool ledOnSampling = line.toInt() > 0;
+
   readFile.close();
+
+  config = {
+    samplingIntervalSecs,
+    ledOnSampling
+    };
+
   return config;
 }
 
@@ -473,9 +483,9 @@ void showSamplingConfig() {
    Serial.print("  Sampling interval [seconds]: ");
    Serial.println(config.samplingIntervalSecs);
    if (config.ledOnSampling){
-      Serial.println("   LED on sampling: ON");
+      Serial.println("    LED on sampling: ON");
    } else {
-      Serial.println("   LED on sampling: OFF");
+      Serial.println("    LED on sampling: OFF");
    }
    
 }
