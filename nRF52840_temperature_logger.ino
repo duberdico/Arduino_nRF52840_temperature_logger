@@ -48,9 +48,15 @@ typedef struct
 {
   unsigned long time;    // using custom epoch January 1, 2026 (1767225600)
   unsigned int  vbat;
-  unsigned int  rtcTemp;
-  unsigned int  temp;
+  int  rtcTemp;
+  int  temp;
 } storeSample;
+
+typedef struct
+{
+  int samplingIntervalSecs;    
+  bool ledOnSampling;
+} samplingConfig;
 
 
 uint32_t vbat_pin = PIN_VBAT;             // A7 for feather nRF52832, A6 for nRF52840
@@ -72,10 +78,10 @@ bool fs_changed = true;;
 
 RTC_DS3231 rtc;
 
-float sampleRtcTemp = -1;
-float sampleTemp = -1;
-long sampleTime = -1.0;
-float sampleVbat = -1.0;
+unsigned long sampleTime = -999;
+float sampleRtcTemp = -999;
+float sampleTemp = -999;
+float sampleVbat = -999.9;
 
 
 int SamplingIntervalMenu();
@@ -336,29 +342,6 @@ void formatSPIFlash() {
  }
 
 
-void setSamplingConfig() {
-   
-   int n = SamplingIntervalMenu();
-   Serial.print(F("  Setting interval to " ));
-   Serial.print(n);
-   Serial.println(F(" seconds" ));
-   File32 writeFile = fatfs.open(SAMPLING_CFG_FILENAME, FILE_WRITE);
-   if (!writeFile) {
-      Serial.println(F("Error, failed to open " SAMPLING_CFG_FILENAME " for writing!"));
-      while (1) {
-        yield();
-      }
-  }
-  Serial.println(F("  Writing config to file " SAMPLING_CFG_FILENAME ));
-  writeFile.print(n, DEC);
-  writeFile.print(",");
-  writeFile.println(0);
-  
-  // Close the file when finished writing.
-  writeFile.close();
-   
-}
-
 
 void sample() { 
 
@@ -372,7 +355,7 @@ void sample() {
     tmp11x.getEvent(&temp); // fill the empty event object with the current measurements
     sampleTemp = temp.temperature;
   } else {
-    sampleTemp = -1;
+    sampleTemp = -999;
   }
 
   sampleRtcTemp = rtc.getTemperature();
@@ -394,41 +377,107 @@ void printSample() {
   
 }
 
+
 void printDataFile() { 
-  
+
   File32 dataFile = fatfs.open(DATA_FILENAME, FILE_READ);
   if (!dataFile) {
     Serial.println(F("  Error, failed to open " DATA_FILENAME " for reading!"));
   } else {
+    
+    // binary format
+    storeSample smp = {};
     while (dataFile.available()) {
-      char c = dataFile.read();
-      Serial.print(c);
+      const size_t bytesRead = dataFile.read((byte *)&smp, sizeof(smp));
+      Serial.print((smp.time * 2)+1767225600);
+      Serial.print(",");
+      Serial.print(smp.vbat/100.0);
+      Serial.print(",");
+      Serial.print(smp.rtcTemp/100.0);
+      Serial.print(",");
+      Serial.println(smp.temp/100.0);
+
     }  
   }
 }
 
 
-int readConfig() {
-  int samplingIntervalSecs = -1;
+
+void setSamplingConfig() {
+
+   int  samplingIntervalSecs = SamplingIntervalMenu();
+   bool ledOnSampling = ledOnSampleMenu();
+
+   samplingConfig config = {
+    samplingIntervalSecs,
+    ledOnSampling
+    };
+
+   Serial.print(F("  Setting interval to " ));
+   Serial.print(config.samplingIntervalSecs);
+   Serial.println(F(" seconds" ));
+   if (config.ledOnSampling) {
+      Serial.println(F(" LED on sampling: ON" ));
+   } else {
+      Serial.println(F(" LED on sampling: OFF" ));
+   }
+   File32 writeFile = fatfs.open(SAMPLING_CFG_FILENAME, FILE_WRITE);
+   if (!writeFile) {
+      Serial.println(F("Error, failed to open " SAMPLING_CFG_FILENAME " for writing!"));
+      while (1) {
+        yield();
+      }
+  }
+  Serial.println(F("  Writing config to file " SAMPLING_CFG_FILENAME ));
+
+  writeFile.write((uint8_t *)&config, sizeof(config));
+
+  // writeFile.print(n, DEC);
+  // writeFile.print(",");
+  // writeFile.println(0);
+  
+  // Close the file when finished writing.
+  writeFile.close();
+
+  samplingConfig writtenConfig = readConfig();
+  Serial.println(writtenConfig.samplingIntervalSecs);
+  Serial.println(writtenConfig.ledOnSampling);
+   
+}
+
+
+samplingConfig readConfig() {
+  
+  samplingConfig config = {-1,false};
   // reads sampling parameters from SPIFlash config file
   File32 readFile = fatfs.open(SAMPLING_CFG_FILENAME, FILE_READ);
   if (!readFile) {
       Serial.println("  Can't find config file !!!!");
-      return -1;
+      return config;
   }
   
-  String line = readFile.readStringUntil('\n');
-  samplingIntervalSecs = line.toInt();
+  const size_t bytesRead = readFile.read((uint8_t *)&config, sizeof(config));
+  Serial.println(bytesRead);
+  // String line = readFile.readStringUntil('\n');
+  // samplingIntervalSecs = line.toInt();
+  // String line = readFile.readStringUntil('\n');
+  // ledOnSampling = line.toInt();
   
   readFile.close();
-  return samplingIntervalSecs;
+  return config;
 }
 
 
 void showSamplingConfig() {
-   int samplingIntervalSecs = readConfig();
+   samplingConfig config = readConfig();
    Serial.print("  Sampling interval [seconds]: ");
-   Serial.println(samplingIntervalSecs);
+   Serial.println(config.samplingIntervalSecs);
+   if (config.ledOnSampling){
+      Serial.println("   LED on sampling: ON");
+   } else {
+      Serial.println("   LED on sampling: OFF");
+   }
+   
 }
 
 
@@ -612,6 +661,20 @@ int SamplingIntervalMenu() {
     }
 }
 
+
+bool ledOnSampleMenu() {
+  Serial.print("  LED on sampling [Y/N] ?");
+  for (;;) {
+      switch (Serial.read()) {
+          case 'y': Serial.println(" y"); return true; break;
+          case 'Y': Serial.println(" Y"); return true; break;
+          case 'n': Serial.println(" n"); return false; break;
+          case 'N': Serial.println(" N"); return false; break;
+          default: continue;  // includes the case 'no input'
+      }
+  }
+}
+
 void oneShotSample() {
   sample(); 
   printSample();
@@ -631,12 +694,13 @@ bool writeSample() {
 
   // binary format
   storeSample smp = {
-    (sampleTime - 1767225600) / 2,
-    (sampleVbat*10),
-    (sampleRtcTemp*10),
-    (sampleTemp*10)
+    (unsigned long)(sampleTime - 1767225600) / 2,
+    (unsigned int)(sampleVbat*100),
+    (int)(sampleRtcTemp*100),
+    (int)(sampleTemp*100)
   };
   writeFile.write((const uint8_t *)&smp, sizeof(smp));
+
   
 //
 //  // text format
@@ -655,8 +719,8 @@ bool writeSample() {
 
 bool startSampling() {
   
-  int samplingIntervalSecs = readConfig();
-  if (samplingIntervalSecs > 0) {
+  samplingConfig config = readConfig();
+  if (config.samplingIntervalSecs > 0) {
     samplingFlag = 1;
     Adafruit_LittleFS_Namespace::File file(InternalFS);
     if ( file.open(SAMPLE_FLAG_FILENAME, Adafruit_LittleFS_Namespace::FILE_O_WRITE)) {
@@ -701,12 +765,12 @@ void runSampling() {
       return;
     } 
     
-  int sampleIntervalSeconds = readConfig();
+  samplingConfig config = readConfig();
   rtc.disable32K();
   rtc.disableAlarm(2);
   rtc.clearAlarm(1);
   rtc.writeSqwPinMode(DS3231_OFF);
-  if (!rtc.setAlarm1(rtc.now() + TimeSpan(0, 0, 0, sampleIntervalSeconds), DS3231_A1_Second)) { 
+  if (!rtc.setAlarm1(rtc.now() + TimeSpan(0, 0, 0, config.samplingIntervalSecs), DS3231_A1_Second)) { 
     Serial.println("Failed to start sampling !");
   } else {
 //    NRF_POWER->GPREGRET = 0x6d;
@@ -834,7 +898,6 @@ void setup() {
 
   bool stopped = false;
     
-
    // Initialize Internal File System
   InternalFS.begin();
 
@@ -855,7 +918,7 @@ void setup() {
     // USB connected to a host
     Serial.begin(115200);
     while ( !Serial ) delay(10);   // for nrf52840 with native usb
-
+    Serial.println("  Serial connected!");
    
     if (stopped) {
       Serial.println("  Stopped sampling !");
@@ -894,6 +957,7 @@ void setup() {
       Serial.println(F("  Error, failed to mount newly formatted filesystem!"));
       Serial.println(F("  Was the flash chip formatted with the SdFat_format example?"));
     }
+    
     Serial.println(F("  Mounted SPIFlash filesystem!"));
 
     Serial.println("  USB mounted!");

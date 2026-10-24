@@ -56,9 +56,9 @@ def convert_file(input_file, output_file, make_plot=False, plot_file=None):
                 .replace("+00:00", "Z")
             )
 
-            vbat_mv = vbat / 10
-            rtc_temp_c = rtc_temp / 10
-            temp_c = temp / 10
+            vbat_mv = vbat / 100.0
+            rtc_temp_c = rtc_temp / 100.0
+            temp_c = temp / 100.0
 
             writer.writerow(
                 [
@@ -84,13 +84,14 @@ def convert_file(input_file, output_file, make_plot=False, plot_file=None):
         create_plot(times, vbat_values, rtc_temp_values, temp_values, plot_file)
 
 
-def create_plot(times, vbat_values, temp_values, plot_file):
+def create_plot(times, vbat_values, rtc_temp_values, temp_values, plot_file):
     try:
         import plotly.graph_objects as go
         from plotly.subplots import make_subplots
     except ImportError:
         raise RuntimeError(
-            "Plotly is required to create plots. " "Install it with: pip install plotly"
+            "Plotly is required to create plots. "
+            "Install it with: pip install plotly ( or apt install python3-plotly to install system-wide on Ubuntu)"
         )
 
     fig = make_subplots(
@@ -98,7 +99,7 @@ def create_plot(times, vbat_values, temp_values, plot_file):
         cols=1,
         shared_xaxes=True,
         vertical_spacing=0.08,
-        subplot_titles=("Battery Voltage", "Temperature"),
+        subplot_titles=("Battery Voltage", "Temperatures"),
     )
 
     fig.add_trace(
@@ -116,9 +117,21 @@ def create_plot(times, vbat_values, temp_values, plot_file):
     fig.add_trace(
         go.Scatter(
             x=times,
-            y=temp_values,
+            y=rtc_temp_values,
             mode="lines",
             name="Temperature",
+            line=dict(width=1),
+        ),
+        row=2,
+        col=1,
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=times,
+            y=temp_values,
+            mode="lines",
+            name="TMP119 Temperature",
             line=dict(width=1),
         ),
         row=2,
