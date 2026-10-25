@@ -764,7 +764,6 @@ void stopSampling() {
 
 void runSampling() {
   
-
   sample();
   samplingConfig config = readConfig();
   if (config.ledOnSampling == true) {
@@ -780,7 +779,6 @@ void runSampling() {
       return;
     } 
     
-  samplingConfig config = readConfig();
   rtc.disable32K();
   rtc.disableAlarm(2);
   rtc.clearAlarm(1);
